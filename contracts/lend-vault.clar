@@ -281,3 +281,80 @@
     (ok true)
   )
 )
+
+;; CALCULATION UTILITIES
+
+;; Calculate dynamic interest rate based on loan size
+(define-read-only (calculate-dynamic-interest-rate (borrow-amount uint))
+  (let (
+      (base-rate BASE-INTEREST-RATE)
+      (scaling-factor (/ borrow-amount u10000))
+    )
+    (+ base-rate (* base-rate scaling-factor))
+  )
+)
+
+;; Calculate liquidation threshold ratio
+(define-read-only (calculate-liquidation-threshold
+    (collateral-amount uint)
+    (borrow-amount uint)
+  )
+  (/ (* collateral-amount u100) borrow-amount)
+)
+
+;; Calculate current collateralization ratio
+(define-read-only (calculate-current-collateral-ratio (loan {
+  collateral-amount: uint,
+  borrowed-amount: uint,
+}))
+  (/ (* (get collateral-amount loan) u100) (get borrowed-amount loan))
+)
+
+;; Calculate total repayment amount including accrued interest
+(define-read-only (calculate-total-repayment (loan {
+  borrowed-amount: uint,
+  interest-rate: uint,
+  start-block: uint,
+}))
+  (let (
+      (blocks-elapsed (- stacks-block-height (get start-block loan)))
+      (interest-accrued (/ (* (get borrowed-amount loan) (get interest-rate loan) blocks-elapsed)
+        (* u100 INTEREST-RATE-MULTIPLIER)
+      ))
+    )
+    (+ (get borrowed-amount loan) interest-accrued)
+  )
+)
+
+;; QUERY FUNCTIONS
+
+;; Retrieve comprehensive loan information
+(define-read-only (get-loan-details
+    (loan-id uint)
+    (borrower principal)
+  )
+  (map-get? loans {
+    loan-id: loan-id,
+    borrower: borrower,
+  })
+)
+
+;; Check if loan position is eligible for liquidation
+(define-read-only (is-loan-liquidatable
+    (loan-id uint)
+    (borrower principal)
+  )
+  (match (map-get? loans {
+    loan-id: loan-id,
+    borrower: borrower,
+  })
+    loan (<
+      (calculate-current-collateral-ratio {
+        collateral-amount: (get collateral-amount loan),
+        borrowed-amount: (get borrowed-amount loan),
+      })
+      (get liquidation-threshold loan)
+    )
+    false
+  )
+)
