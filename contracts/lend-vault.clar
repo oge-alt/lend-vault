@@ -84,3 +84,83 @@
 (define-constant BASE-INTEREST-RATE u5) ;; 5% base annual interest rate
 (define-constant INTEREST-RATE-MULTIPLIER u100) ;; Interest calculation multiplier
 (define-constant MAX-LOAN-TERM u52560) ;; Maximum loan term (~1 year in blocks)
+
+;; ADMINISTRATIVE FUNCTIONS
+
+;; Transfer protocol administration to new principal
+(define-public (set-admin (new-admin principal))
+  (begin
+    ;; Verify current admin authorization
+    (asserts! (is-eq tx-sender (var-get admin-principal)) ERR-NOT-AUTHORIZED)
+
+    ;; Validate admin change parameters
+    (asserts!
+      (and
+        (not (is-eq new-admin (var-get admin-principal)))
+        (not (is-eq new-admin tx-sender))
+      )
+      ERR-INVALID-ADMIN-CHANGE
+    )
+
+    (ok (var-set admin-principal new-admin))
+  )
+)
+
+;; Update liquidation penalty percentage
+(define-public (set-liquidation-penalty (new-penalty uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get admin-principal)) ERR-NOT-AUTHORIZED)
+    (asserts! (< new-penalty u50) ERR-NOT-AUTHORIZED)
+    (ok (var-set liquidation-penalty new-penalty))
+  )
+)
+
+;; CORE LENDING FUNCTIONS
+
+;; Create new collateralized loan position
+(define-public (create-loan
+    (collateral-token <ft-trait>)
+    (collateral-amount uint)
+    (borrow-amount uint)
+  )
+  (let (
+      (borrower tx-sender)
+      (new-loan-id (+ (var-get loan-counter) u1))
+      (collateral-balance (unwrap! (contract-call? collateral-token get-balance borrower)
+        ERR-INSUFFICIENT-BALANCE
+      ))
+      (interest-rate (calculate-dynamic-interest-rate borrow-amount))
+      (liquidation-threshold (calculate-liquidation-threshold collateral-amount borrow-amount))
+    )
+    ;; Validate input parameters
+    (asserts! (> collateral-amount u0) ERR-INVALID-LOAN-AMOUNT)
+    (asserts! (>= collateral-balance collateral-amount) ERR-INSUFFICIENT-BALANCE)
+    (asserts! (> borrow-amount u0) ERR-INVALID-LOAN-AMOUNT)
+    (asserts! (>= liquidation-threshold MIN-COLLATERALIZATION-RATIO)
+      ERR-INVALID-COLLATERAL-RATIO
+    )
+
+    ;; Transfer collateral tokens to contract custody
+    (try! (contract-call? collateral-token transfer collateral-amount borrower
+      (as-contract tx-sender) none
+    ))
+
+    ;; Initialize loan record in storage
+    (map-set loans {
+      loan-id: new-loan-id,
+      borrower: borrower,
+    } {
+      collateral-amount: collateral-amount,
+      borrowed-amount: borrow-amount,
+      interest-rate: interest-rate,
+      start-block: stacks-block-height,
+      is-active: true,
+      liquidation-threshold: liquidation-threshold,
+    })
+
+    ;; Update global loan counter
+    (var-set loan-counter new-loan-id)
+
+    (ok new-loan-id)
+  )
+)
