@@ -164,3 +164,120 @@
     (ok new-loan-id)
   )
 )
+
+;; Execute loan repayment and release collateral
+(define-public (repay-loan
+    (loan-id uint)
+    (collateral-token <ft-trait>)
+    (repayment-token <ft-trait>)
+    (repayment-amount uint)
+  )
+  (let (
+      ;; Retrieve and validate loan record
+      (loan (unwrap!
+        (map-get? loans {
+          loan-id: loan-id,
+          borrower: tx-sender,
+        })
+        ERR-LOAN-NOT-FOUND
+      ))
+      (total-repayment (calculate-total-repayment {
+        borrowed-amount: (get borrowed-amount loan),
+        interest-rate: (get interest-rate loan),
+        start-block: (get start-block loan),
+      }))
+      ;; Verify token balance availability
+      (repayment-balance (unwrap! (contract-call? repayment-token get-balance tx-sender)
+        ERR-INSUFFICIENT-BALANCE
+      ))
+      (collateral-balance (unwrap!
+        (contract-call? collateral-token get-balance (as-contract tx-sender))
+        ERR-INSUFFICIENT-BALANCE
+      ))
+    )
+    ;; Validate repayment conditions
+    (asserts! (> loan-id u0) ERR-INVALID-LOAN-AMOUNT)
+    (asserts! (get is-active loan) ERR-LOAN-ALREADY-LIQUIDATED)
+    (asserts! (>= repayment-balance total-repayment) ERR-INSUFFICIENT-BALANCE)
+    (asserts! (>= repayment-amount total-repayment) ERR-INSUFFICIENT-BALANCE)
+    (asserts! (>= collateral-balance (get collateral-amount loan))
+      ERR-INSUFFICIENT-BALANCE
+    )
+
+    ;; Process repayment transfer
+    (try! (contract-call? repayment-token transfer total-repayment tx-sender
+      (as-contract tx-sender) none
+    ))
+
+    ;; Return collateral to borrower
+    (try! (as-contract (contract-call? collateral-token transfer (get collateral-amount loan)
+      (as-contract tx-sender) tx-sender none
+    )))
+
+    ;; Close loan position
+    (map-set loans {
+      loan-id: loan-id,
+      borrower: tx-sender,
+    }
+      (merge loan { is-active: false })
+    )
+
+    (ok true)
+  )
+)
+
+;; Execute liquidation of undercollateralized loan
+(define-public (liquidate-loan
+    (loan-id uint)
+    (borrower principal)
+    (collateral-token <ft-trait>)
+  )
+  (let (
+      ;; Parameter validation
+      (validated-loan-id (asserts! (> loan-id u0) ERR-INVALID-LOAN-AMOUNT))
+      (validated-borrower (asserts! (not (is-eq borrower tx-sender)) ERR-NOT-AUTHORIZED))
+      ;; Retrieve loan information
+      (loan (unwrap!
+        (map-get? loans {
+          loan-id: loan-id,
+          borrower: borrower,
+        })
+        ERR-LOAN-NOT-FOUND
+      ))
+      (current-collateral-ratio (calculate-current-collateral-ratio {
+        collateral-amount: (get collateral-amount loan),
+        borrowed-amount: (get borrowed-amount loan),
+      }))
+      (penalty-amount (/ (* (get collateral-amount loan) (var-get liquidation-penalty)) u100))
+      ;; Verify collateral availability
+      (collateral-balance (unwrap!
+        (contract-call? collateral-token get-balance (as-contract tx-sender))
+        ERR-INSUFFICIENT-BALANCE
+      ))
+    )
+    ;; Validate liquidation eligibility
+    (asserts! (>= collateral-balance (get collateral-amount loan))
+      ERR-INSUFFICIENT-BALANCE
+    )
+    (asserts! (get is-active loan) ERR-LOAN-ALREADY-LIQUIDATED)
+    (asserts! (< current-collateral-ratio (get liquidation-threshold loan))
+      ERR-LOAN-NOT-LIQUIDATABLE
+    )
+
+    ;; Transfer collateral to liquidator (minus penalty)
+    (try! (as-contract (contract-call? collateral-token transfer
+      (- (get collateral-amount loan) penalty-amount) (as-contract tx-sender)
+      tx-sender none
+    )))
+
+    ;; Close liquidated loan position
+    (map-set loans {
+      loan-id: loan-id,
+      borrower: borrower,
+    }
+      (merge loan { is-active: false })
+    )
+
+    (ok true)
+  )
+)
